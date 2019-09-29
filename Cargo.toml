@@ -1,7 +1,7 @@
 [package]
-name = "cim_decrypter"
+name = "cim-tools"
 version = "0.1.0"
-authors = ["Bela Stoyan <bas@nyantec.com>"]
+authors = ["Bela Stoyan <cim@be7a.de>"]
 edition = "2018"
 
 [dependencies]
