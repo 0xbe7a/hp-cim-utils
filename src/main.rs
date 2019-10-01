@@ -76,7 +76,7 @@ fn read_firmware_section(
     cipher: &Cipher,
     iv: &mut Vec<u8>,
 ) {
-    let mut file = File::create(target_path.join("mtd2.sqfs.gz")).unwrap();
+    let mut file = File::create(target_path.join(name)).unwrap();
     let file_content = read_and_decrypt(length, firmware_file, cipher, iv).expect("Unexpected EOF");
     // Compute the HMAC
     let key = PKey::hmac(HMAC_KEY).unwrap();
