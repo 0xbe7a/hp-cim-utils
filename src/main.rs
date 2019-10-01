@@ -17,7 +17,7 @@ use std::ffi::CString;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 use clap::{App, Arg, SubCommand};
@@ -43,23 +43,37 @@ fn convert_length(number: &str) -> u64 {
     return size;
 }
 
-fn read_and_decrypt(len: usize, f: &mut File, cipher: &Cipher, mut iv: &mut Vec<u8>) -> Vec<u8> {
-    let cipher = Cipher::aes_128_cbc();
-    let mut crypter = Crypter::new(cipher, Mode::Decrypt, &AES_DECRYPION_KEY, Some(&iv)).unwrap();
+fn read_and_decrypt(len: usize, f: &mut File, cipher: &Cipher, iv: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let mut crypter = Crypter::new(*cipher, Mode::Decrypt, &AES_DECRYPION_KEY, Some(&iv)).unwrap();
 
     let mut block_buffer = vec![0 as u8; len];
     let read_bytes = f.read(&mut block_buffer).unwrap();
     if read_bytes == 0 {
-        panic!("EOF");
+        return None
     }
-    let mut output = vec![0 as u8; block_buffer.len() + Cipher::aes_128_cbc().block_size()];
-    let decrypted_result = crypter.update(&block_buffer, &mut output);
+    let mut output = vec![0 as u8; read_bytes + Cipher::aes_128_cbc().block_size()];
+    crypter.update(&block_buffer[..read_bytes], &mut output).expect("Could not decrypt Ciphertext");
 
     //let mut file = OpenOptions::new().append(true).open("raw.img").unwrap();
     //file.write_all(&output[..]);
 
     *iv = block_buffer[len - 0x10..len].to_vec();
-    return output;
+    return Some(output);
+}
+
+fn read_firmware_section(name: &str, target_path: &PathBuf, length: usize, firmware_file: &mut File, cipher: &Cipher, iv: &mut Vec<u8>){
+    let mut file = File::create(target_path.join("mtd2.sqfs.gz")).unwrap();
+    let file_content = read_and_decrypt(length, firmware_file, cipher, iv).expect("Unexpected EOF");
+        
+    // Compute the HMAC
+    let key = PKey::hmac(HMAC_KEY).unwrap();
+
+    let mut signer = Signer::new(MessageDigest::sha1(), &key).unwrap();
+    signer.update(&file_content[..2524]).unwrap();
+    let hmac = signer.sign_to_vec().unwrap();
+    println!("Calculated HMAC: {:x?}", hmac);
+
+    file.write_all(&file_content).expect(&format!("Could not write {}", name));
 }
 
 fn dump_firmware(source: &str, target: &str) {
@@ -101,14 +115,21 @@ fn dump_firmware(source: &str, target: &str) {
     loop {
         println!("------------------------------------");
         i += 1;
-        let output = read_and_decrypt(0x200, &mut f, &cipher, &mut iv);
+        let output = match read_and_decrypt(0x200, &mut f, &cipher, &mut iv){
+            Some(out) => out,
+            None => {
+                println!("EOF readched");
+                break;
+            }
+        };
 
         if &output[0x101..0x106] != b"ustar" {
-            panic!("ustar not found");
+            println!("ustar not found, assuming EOF");
+            break;
         }
 
         if let Ok(parsed_command) = str::from_utf8(&output[..12]) {
-            println!("Command: {}", parsed_command);
+            println!("Section Name: {}", parsed_command);
         } else {
             panic!("Command RAW: {:?}", &output[0..12]);
         };
@@ -123,12 +144,12 @@ fn dump_firmware(source: &str, target: &str) {
         let second_length = convert_length(lengths[1]);
         println!("Second Length: {}", second_length);
         let third_length = convert_length(lengths[2]);
-        println!("third_length Length: {}", third_length);
+        println!("Third Length: {}", third_length);
 
         if &output[0..9] == b"signature" {
             println!("Signature block");
             //Read and Print Signature Header
-            let output = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv);
+            let output = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv).expect("Unexpected EOF");
             let signatures = str::from_utf8(&output[..]).unwrap();
 
             println!("Image Header:");
@@ -138,56 +159,19 @@ fn dump_firmware(source: &str, target: &str) {
                 }
             }
         } else if &output[0..10] == b"_kernel-0b" {
-            println!("Kernel 0b Block");
-
-            let mut file = File::create(target_path.join("kernel_0b.uImage")).unwrap();
-            let file_content = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv);
-            file.write_all(&file_content);
+            read_firmware_section("kernel_0b.uimage", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
         } else if &output[0..10] == b"_kernel-12" {
-            println!("Kernel 12 Block");
-
-            let mut file = File::create(target_path.join("kernel_12.uImage")).unwrap();
-            let file_content = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv);
-            file.write_all(&file_content);
+            read_firmware_section("kernel_12.uimage", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
         } else if &output[0..5] == b"_mtd1" {
-            println!("MTD1 Block");
-
-            let mut file = File::create(target_path.join("mtd1.uImage")).unwrap();
-            let file_content = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv);
-            file.write_all(&file_content);
+            read_firmware_section("mtd1.uImage", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
         } else if &output[0..5] == b"_mtd2" {
-            println!("MTD2 Block");
-
-            let mut file = File::create(target_path.join("mtd2.sqfs.gz")).unwrap();
-            let file_content = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv);
-            file.write_all(&file_content);
+            read_firmware_section("mtd2.sqfs.gz", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
         } else if &output[0..5] == b"_mtd5" {
-            println!("MTD5 Block");
-
-            let mut file = File::create(target_path.join("mtd5.sqfs.gz")).unwrap();
-            let file_content = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv);
-            file.write_all(&file_content);
+            read_firmware_section("mtd5.sqfs.gz", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
         } else if &output[0..7] == b"execute" {
-            println!("Execute Block");
-
-            let mut file = File::create(target_path.join("execute.sh")).unwrap();
-            let file_content = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv);
-
-            let key = PKey::hmac(HMAC_KEY).unwrap();
-
-            // Compute the HMAC
-            let mut signer = Signer::new(MessageDigest::sha1(), &key).unwrap();
-            signer.update(&file_content[..2524]).unwrap();
-            let hmac = signer.sign_to_vec().unwrap();
-            println!("HMAC: {:x?}", hmac);
-
-            file.write_all(&file_content);
+            read_firmware_section("execute.sh", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
         } else if &output[0..5] == b"file0" {
-            println!("File Block");
-
-            let mut file = File::create(target_path.join("file.tar.gz")).unwrap();
-            let file_content = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv);
-            file.write_all(&file_content);
+            read_firmware_section("file0.tar.gz", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
         }
     }
 }
@@ -239,6 +223,7 @@ fn main() {
                     Arg::with_name("dest")
                         .short("d")
                         .help("Destination FOLDER of the extracted files")
+                        .required(true)
                         .index(2),
                 ),
         )
@@ -249,19 +234,13 @@ fn main() {
         )
         .get_matches();
 
-    if let Some(matches) = matches.subcommand_matches("sh") {
+    if let Some(_) = matches.subcommand_matches("sh") {
         calculate_response();
     } else if let Some(matches) = matches.subcommand_matches("dump") {
-        let dest_path = match matches.value_of("dest") {
-            Some(dest) => {
-                fs::create_dir(dest);
-                dest
-            }
-            None => {
-                fs::create_dir("extracted");
-                "extracted"
-            }
-        };
+        let dest_path = matches.value_of("dest").unwrap();
+        if !Path::new(dest_path).exists() {
+            fs::create_dir(dest_path).expect("Could not create Target Folder");
+        }
         dump_firmware(matches.value_of("source").unwrap(), dest_path);
     }
 }
