@@ -43,16 +43,23 @@ fn convert_length(number: &str) -> u64 {
     return size;
 }
 
-fn read_and_decrypt(len: usize, f: &mut File, cipher: &Cipher, iv: &mut Vec<u8>) -> Option<Vec<u8>> {
+fn read_and_decrypt(
+    len: usize,
+    f: &mut File,
+    cipher: &Cipher,
+    iv: &mut Vec<u8>,
+) -> Option<Vec<u8>> {
     let mut crypter = Crypter::new(*cipher, Mode::Decrypt, &AES_DECRYPION_KEY, Some(&iv)).unwrap();
 
     let mut block_buffer = vec![0 as u8; len];
     let read_bytes = f.read(&mut block_buffer).unwrap();
     if read_bytes == 0 {
-        return None
+        return None;
     }
     let mut output = vec![0 as u8; read_bytes + Cipher::aes_128_cbc().block_size()];
-    crypter.update(&block_buffer[..read_bytes], &mut output).expect("Could not decrypt Ciphertext");
+    crypter
+        .update(&block_buffer[..read_bytes], &mut output)
+        .expect("Could not decrypt Ciphertext");
 
     //let mut file = OpenOptions::new().append(true).open("raw.img").unwrap();
     //file.write_all(&output[..]);
@@ -61,10 +68,16 @@ fn read_and_decrypt(len: usize, f: &mut File, cipher: &Cipher, iv: &mut Vec<u8>)
     return Some(output);
 }
 
-fn read_firmware_section(name: &str, target_path: &PathBuf, length: usize, firmware_file: &mut File, cipher: &Cipher, iv: &mut Vec<u8>){
+fn read_firmware_section(
+    name: &str,
+    target_path: &PathBuf,
+    length: usize,
+    firmware_file: &mut File,
+    cipher: &Cipher,
+    iv: &mut Vec<u8>,
+) {
     let mut file = File::create(target_path.join("mtd2.sqfs.gz")).unwrap();
     let file_content = read_and_decrypt(length, firmware_file, cipher, iv).expect("Unexpected EOF");
-        
     // Compute the HMAC
     let key = PKey::hmac(HMAC_KEY).unwrap();
 
@@ -73,7 +86,8 @@ fn read_firmware_section(name: &str, target_path: &PathBuf, length: usize, firmw
     let hmac = signer.sign_to_vec().unwrap();
     println!("Calculated HMAC: {:x?}", hmac);
 
-    file.write_all(&file_content).expect(&format!("Could not write {}", name));
+    file.write_all(&file_content)
+        .expect(&format!("Could not write {}", name));
 }
 
 fn dump_firmware(source: &str, target: &str) {
@@ -115,7 +129,7 @@ fn dump_firmware(source: &str, target: &str) {
     loop {
         println!("------------------------------------");
         i += 1;
-        let output = match read_and_decrypt(0x200, &mut f, &cipher, &mut iv){
+        let output = match read_and_decrypt(0x200, &mut f, &cipher, &mut iv) {
             Some(out) => out,
             None => {
                 println!("EOF readched");
@@ -149,7 +163,8 @@ fn dump_firmware(source: &str, target: &str) {
         if &output[0..9] == b"signature" {
             println!("Signature block");
             //Read and Print Signature Header
-            let output = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv).expect("Unexpected EOF");
+            let output = read_and_decrypt(first_length as usize, &mut f, &cipher, &mut iv)
+                .expect("Unexpected EOF");
             let signatures = str::from_utf8(&output[..]).unwrap();
 
             println!("Image Header:");
@@ -159,19 +174,68 @@ fn dump_firmware(source: &str, target: &str) {
                 }
             }
         } else if &output[0..10] == b"_kernel-0b" {
-            read_firmware_section("kernel_0b.uimage", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
+            read_firmware_section(
+                "kernel_0b.uimage",
+                &target_path,
+                first_length as usize,
+                &mut f,
+                &cipher,
+                &mut iv,
+            );
         } else if &output[0..10] == b"_kernel-12" {
-            read_firmware_section("kernel_12.uimage", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
+            read_firmware_section(
+                "kernel_12.uimage",
+                &target_path,
+                first_length as usize,
+                &mut f,
+                &cipher,
+                &mut iv,
+            );
         } else if &output[0..5] == b"_mtd1" {
-            read_firmware_section("mtd1.uImage", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
+            read_firmware_section(
+                "mtd1.uImage",
+                &target_path,
+                first_length as usize,
+                &mut f,
+                &cipher,
+                &mut iv,
+            );
         } else if &output[0..5] == b"_mtd2" {
-            read_firmware_section("mtd2.sqfs.gz", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
+            read_firmware_section(
+                "mtd2.sqfs.gz",
+                &target_path,
+                first_length as usize,
+                &mut f,
+                &cipher,
+                &mut iv,
+            );
         } else if &output[0..5] == b"_mtd5" {
-            read_firmware_section("mtd5.sqfs.gz", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
+            read_firmware_section(
+                "mtd5.sqfs.gz",
+                &target_path,
+                first_length as usize,
+                &mut f,
+                &cipher,
+                &mut iv,
+            );
         } else if &output[0..7] == b"execute" {
-            read_firmware_section("execute.sh", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
+            read_firmware_section(
+                "execute.sh",
+                &target_path,
+                first_length as usize,
+                &mut f,
+                &cipher,
+                &mut iv,
+            );
         } else if &output[0..5] == b"file0" {
-            read_firmware_section("file0.tar.gz", &target_path, first_length as usize, &mut f, &cipher, &mut iv);
+            read_firmware_section(
+                "file0.tar.gz",
+                &target_path,
+                first_length as usize,
+                &mut f,
+                &cipher,
+                &mut iv,
+            );
         }
     }
 }
